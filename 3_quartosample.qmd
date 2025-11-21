@@ -1,0 +1,426 @@
+---
+title: "Species distribution model for *Danaus plexippus*"
+date: "2025-11-21"
+params:
+  species: "Danaus plexippus"
+  region: "United States"
+  n_records: 500
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+  revealjs:
+    theme: dark
+    smaller: true
+bibliography: 3_references.bib
+execute:
+  warning: false
+  message: false
+---
+
+# Introduction {#sec-intro}
+
+::: {.callout-note}
+## Research Question
+What environmental factors drive the distribution of *Danaus plexippus* across the United States?
+:::
+
+Species distribution models intend to summarize how environmental conditions shape where species occur [@elith2009species]. This report briefly examines *Danaus plexippus* distribution using occurrence data from GBIF and particular environmental predictors.
+
+::: {.content-visible when-format="html"}
+We focus on temperature and precipitation as primary drivers [@phillips2006maximum].
+:::
+
+::: {.content-visible when-format="revealjs"}
+**Key predictors:** Temperature and precipitation.
+:::
+
+# Methods {#sec-methods}
+
+## Data acquisition
+```{r}
+#| label: setup
+#| code-summary: "Load packages"
+
+library(rgbif)
+library(raster)
+library(ggplot2)
+library(leaflet)
+library(plotly)
+library(knitr)
+
+set.seed(123)
+
+# Set parameters as variables
+species_name <- "Danaus plexippus"
+region_name <- "United States"
+n_records_target <- 500
+```
+
+```{r}
+#| label: get-data
+#| cache: true
+#| code-summary: "Retrieve occurrence data"
+
+# Download from GBIF
+species_key <- name_backbone(name = species_name)$usageKey
+occ_data <- occ_search(taxonKey = species_key, 
+                       country = "US",
+                       hasCoordinate = TRUE,
+                       limit = n_records_target)
+occ_df <- occ_data$data
+
+cat("Downloaded", nrow(occ_df), "records from GBIF\n")
+```
+
+We retrieved occurrence records from GBIF for the target species.
+
+## Environmental data
+
+::: {.panel-tabset}
+
+### Variables
+
+We will only be using two variables to fit the model.
+
+```{r}
+#| label: tbl-variables
+#| tbl-cap: "Environmental variables that will be used in the model."
+
+vars <- data.frame(
+  Variable = c("BIO1", "BIO12"),
+  Description = c("Annual mMean temperature", "Annual precipitation"),
+  Units = c("°C × 10", "mm")
+)
+kable(vars)
+```
+
+### Preparation
+
+We will be generating some variables for this component but one can also read in existing rasters.
+
+```{r}
+#| label: prep-env
+
+# Clean coordinates
+coords <- occ_df[, c("decimalLongitude", "decimalLatitude")]
+coords <- coords[complete.cases(coords), ]
+
+# Create raster stack (simulated bioclimatic data)
+ext <- extent(c(-125, -65, 25, 50))
+temp <- raster(ext, res = 0.5)
+values(temp) <- rnorm(ncell(temp), 15, 5)
+precip <- raster(ext, res = 0.5)
+values(precip) <- rnorm(ncell(precip), 800, 200)
+env_stack <- stack(temp, precip)
+names(env_stack) <- c("bio1", "bio12")
+```
+
+:::
+
+## Model Fitting
+
+We fit a GLM as our species distribution model:
+
+$$
+\text{logit}(p) = \beta_0 + \beta_1 \times \text{temp} + \beta_2 \times \text{precip}
+$$ {#eq-model}
+
+Now, we can fit the relevant regression model based on the data we retrieved.
+
+```{r}
+#| label: fit-model
+#| cache: true
+
+# Extract environmental values for presence points
+n_presence <- min(100, nrow(coords))
+presence_coords <- coords[1:n_presence, ]
+presence_env <- extract(env_stack, presence_coords)
+
+# Generate background points (manually)
+# Sample random points within the study extent
+n_background <- 500
+background_coords <- data.frame(
+  decimalLongitude = runif(n_background, 
+                           min = ext@xmin, 
+                           max = ext@xmax),
+  decimalLatitude = runif(n_background, 
+                          min = ext@ymin, 
+                          max = ext@ymax)
+)
+
+# Extract environmental values for background points
+background_env <- extract(env_stack, background_coords)
+
+# Create model data
+model_data <- data.frame(
+  presence = c(rep(1, nrow(presence_env)), rep(0, nrow(background_env))),
+  rbind(presence_env, background_env)
+)
+model_data <- na.omit(model_data)
+
+# Fit model
+sdm <- glm(presence ~ bio1 + bio12, data = model_data, family = binomial)
+
+cat("Model fitted with", nrow(model_data), "total observations\n")
+```
+
+# Results {#sec-results}
+
+In this section, we will be reviewing the performance and additional details relative to the target species of our logistic regression model.
+
+## Model performance
+```{r}
+#| label: tbl-performance
+#| tbl-cap: "Model evaluation metrics"
+
+# Calculate AUC
+preds <- predict(sdm, type = "response")
+actual <- model_data$presence
+roc_df <- data.frame(pred = preds, actual = actual)
+roc_df <- roc_df[order(roc_df$pred, decreasing = TRUE), ]
+tpr <- cumsum(roc_df$actual) / sum(roc_df$actual)
+fpr <- cumsum(!roc_df$actual) / sum(!roc_df$actual)
+auc <- sum(diff(fpr) * (tpr[-1] + tpr[-length(tpr)]) / 2)
+
+perf <- data.frame(
+  Metric = c("AUC", "Presence Points", "Background Points"),
+  Value = c(round(auc, 3), sum(model_data$presence == 1), 
+            sum(model_data$presence == 0))
+)
+kable(perf)
+```
+
+The model achieved an AUC of `r round(auc, 3)`, suggesting good performance [@fielding1997review].
+
+## Projected distribution
+
+We will briefly show the projected suitability map for the target species.
+
+```{r}
+#| label: fig-distribution
+#| fig-cap: "Predicted habitat suitability across the study region. White points show occurrence locations."
+#| fig-width: 9
+#| fig-height: 6
+
+# Create prediction raster
+prediction <- predict(env_stack, sdm, type = "response")
+
+# Plot
+plot(prediction,
+     col = hcl.colors(100, "viridis"),
+     main = "Distribution: Danaus plexippus",
+     legend.args = list(text = "Suitability", side = 4, line = 2.5),
+     axes = FALSE)
+
+# Add occurrence points
+points(presence_coords, pch = 20, cex = 0.5, col = "red")
+
+# Add map elements
+legend("bottomleft", 
+       legend = "Occurrence records",
+       pch = 20,
+       col = "red",
+       bg = "gray20",
+       text.col = "white")
+```
+
+Why does @fig-distribution look like this?
+
+## Interactive map
+
+::: {.content-visible when-format="html"}
+```{r}
+#| label: fig-interactive
+#| fig-cap: "Interactive occurrence map. Click points for coordinate details."
+
+leaflet(data = presence_coords) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~decimalLongitude,
+    lat = ~decimalLatitude,
+    radius = 3,
+    color = "gold",
+    fillOpacity = 0.7,
+    popup = ~paste("Lat:", round(decimalLatitude, 2), 
+                   "Lon:", round(decimalLongitude, 2))
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = "gold",
+    labels = "Occurrences",
+    title = "Danaus plexippus"
+  )
+```
+
+:::
+
+## Response curves
+
+We will examine the distribution of the target species (predicted probability of occurrence) relative to the each of the predictors.
+
+::: {.panel-tabset}
+
+### Temperature
+```{r}
+#| label: fig-temp
+#| fig-cap: "Species response to annual mean temperature"
+
+temp_seq <- seq(min(model_data$bio1, na.rm = TRUE),
+                max(model_data$bio1, na.rm = TRUE), 
+                length.out = 100)
+pred_temp <- predict(sdm, 
+                     newdata = data.frame(
+                       bio1 = temp_seq,
+                       bio12 = mean(model_data$bio12, na.rm = TRUE)
+                     ),
+                     type = "response")
+
+plot(temp_seq, pred_temp, type = "l", lwd = 2,
+     col = "darkblue", 
+     xlab = "Annual mean temperature (°C × 10)", 
+     ylab = "Predicted probability",
+     main = "Temperature response curve")
+grid()
+```
+
+### Precipitation
+```{r}
+#| label: fig-precip
+#| fig-cap: "Species response to annual precipitation"
+
+precip_seq <- seq(min(model_data$bio12, na.rm = TRUE),
+                  max(model_data$bio12, na.rm = TRUE),
+                  length.out = 100)
+pred_precip <- predict(sdm,
+                       newdata = data.frame(
+                         bio1 = mean(model_data$bio1, na.rm = TRUE),
+                         bio12 = precip_seq
+                       ),
+                       type = "response")
+
+plot(precip_seq, pred_precip, type = "l", lwd = 2,
+     col = "steelblue", 
+     xlab = "Annual precipitation (mm)", 
+     ylab = "Predicted probability",
+     main = "Precipitation response curve")
+grid()
+```
+
+:::
+
+## Variable importance
+
+Now, let's look into variable importance for the target predictors.
+
+```{r}
+#| label: fig-importance
+#| fig-cap: "Relative contribution of environmental variables to the model"
+#| column: margin
+
+importance <- abs(coef(sdm)[-1]) / sum(abs(coef(sdm)[-1])) * 100
+
+par(mar = c(5, 4, 2, 2))
+barplot(importance, 
+        names.arg = c("Temp", "Precip"),
+        col = c("coral", "skyblue"), 
+        ylab = "Relative importance (%)",
+        ylim = c(0, 100))
+```
+
+Temperature contributes `r round(importance[1], 1)`% to the model (see @fig-importance).
+
+## Model coefficients
+```{r}
+#| label: tbl-coefficients
+#| tbl-cap: "Logistic regression coefficients"
+
+coef_table <- data.frame(
+  Variable = names(coef(sdm)),
+  Coefficient = round(coef(sdm), 4),
+  Std_Error = round(summary(sdm)$coefficients[, "Std. Error"], 4),
+  P_value = round(summary(sdm)$coefficients[, "Pr(>|z|)"], 4)
+)
+rownames(coef_table) <- NULL
+
+kable(coef_table)
+```
+
+# Discussion {#sec-discussion}
+
+::: {.callout-important}
+## Conservation Implications
+Strong temperature dependence suggests vulnerability to climate change.
+:::
+
+Our findings align with previous studies on lepidopteran distributions [@oberhauser2012monarch]. Our model equation (@eq-model) captures the relationship between environmental conditions and occurrence probability.
+
+::: {.content-visible when-format="revealjs"}
+**Future directions:**
+
+- Retrieve and analyze real temperature and precipitation rasters
+- Include land use variables
+- Project under climate scenarios
+:::
+
+# Conclusions
+
+Key findings from this analysis:
+
+1. Temperature is the primary driver (contributes `r round(importance[1], 1)`%)
+2. Model shows good performance (AUC = `r round(auc, 3)`)
+3. Distribution patterns match known ranges
+4. Climate change poses conservation challenges
+
+See @sec-methods for methodological details and @sec-results for complete results.
+
+# References
+
+::: {#refs}
+:::
+
+# Appendix
+
+## Session info
+```{r}
+#| label: session
+#| code-fold: true
+
+sessionInfo()
+```
+
+## Workflow diagram
+```{mermaid}
+flowchart LR
+    A[GBIF Data] --> B[Clean Data]
+    B --> C[Generate Background]
+    C --> D[Fit GLM]
+    D --> E[Predict]
+    E --> F[Visualize]
+    
+    style A fill:#e1f5dd
+    style D fill:#fff4cc
+    style F fill:#ffe6e6
+```
+
+## Data summary
+```{r}
+#| label: data-summary
+#| code-fold: true
+
+summary_stats <- data.frame(
+  Statistic = c("Total occurrence records",
+                "Presence points in model",
+                "Background points",
+                "Environmental variables",
+                "Study extent"),
+  Value = c(nrow(occ_df),
+            sum(model_data$presence == 1),
+            sum(model_data$presence == 0),
+            "2 (temperature, precipitation)",
+            "Continental United States")
+)
+
+kable(summary_stats, align = c("l", "l"))
+```
