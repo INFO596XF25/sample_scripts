@@ -1,8 +1,8 @@
 ---
-title: "Species distribution model for *Danaus plexippus*"
+title: "Species distribution model"
 date: "2025-11-21"
 params:
-  species: "Danaus plexippus"
+  species: "Libytheana carinenta"
   region: "United States"
   n_records: 500
 format:
@@ -23,10 +23,10 @@ execute:
 
 ::: {.callout-note}
 ## Research Question
-What environmental factors drive the distribution of *Danaus plexippus* across the United States?
+What environmental factors drive the distribution of `r params$species` across the United States?
 :::
 
-Species distribution models intend to summarize how environmental conditions shape where species occur [@elith2009species]. This report briefly examines *Danaus plexippus* distribution using occurrence data from GBIF and particular environmental predictors.
+Species distribution models intend to summarize how environmental conditions shape where species occur [@elith2009species]. This report briefly examines `r params$species` distribution using occurrence data from GBIF and particular environmental predictors.
 
 ::: {.content-visible when-format="html"}
 We focus on temperature and precipitation as primary drivers [@phillips2006maximum].
@@ -53,9 +53,10 @@ library(knitr)
 set.seed(123)
 
 # Set parameters as variables
-species_name <- "Danaus plexippus"
-region_name <- "United States"
-n_records_target <- 500
+species_name <- params$species
+print(species_name)
+region_name <- params$region
+n_records_target <- params$n_records
 ```
 
 ```{r}
@@ -72,6 +73,7 @@ occ_data <- occ_search(taxonKey = species_key,
 occ_df <- occ_data$data
 
 cat("Downloaded", nrow(occ_df), "records from GBIF\n")
+print(species_name)
 ```
 
 We retrieved occurrence records from GBIF for the target species.
@@ -210,7 +212,7 @@ prediction <- predict(env_stack, sdm, type = "response")
 # Plot
 plot(prediction,
      col = hcl.colors(100, "viridis"),
-     main = "Distribution: Danaus plexippus",
+     main = "Distribution",
      legend.args = list(text = "Suitability", side = 4, line = 2.5),
      axes = FALSE)
 
@@ -249,8 +251,7 @@ leaflet(data = presence_coords) %>%
   addLegend(
     position = "bottomright",
     colors = "gold",
-    labels = "Occurrences",
-    title = "Danaus plexippus"
+    labels = "Occurrences"
   )
 ```
 
